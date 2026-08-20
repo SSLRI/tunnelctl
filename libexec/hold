@@ -1,0 +1,12 @@
+#!/bin/sh
+
+trap '' INT QUIT TSTP
+
+printf '\r\n'
+printf '  Tunnel session established.\r\n'
+printf '  Keep this session open while the tunnel is in use.\r\n'
+printf '\r\n'
+
+while true; do
+    sleep 600
+done
