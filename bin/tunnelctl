@@ -1,0 +1,238 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+SELF_DIR="/usr/local/lib/tunnelctl"
+[ -d "$SELF_DIR/lib" ] || SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+. "$SELF_DIR/lib/common.sh"
+. "$SELF_DIR/lib/users.sh"
+. "$SELF_DIR/lib/services.sh"
+. "$SELF_DIR/lib/security.sh"
+. "$SELF_DIR/lib/monitor.sh"
+. "$SELF_DIR/lib/backup.sh"
+
+need_root
+db_init
+load_config
+
+count_by_state() {
+    local wanted="$1" user total=0
+    while IFS= read -r user; do
+        [ -n "$user" ] || continue
+        case "$wanted" in
+            locked) [ "$(db_state "$user")" = "locked" ] && total=$(( total + 1 )) ;;
+            expired) is_expired "$(db_expires "$user")" && total=$(( total + 1 )) ;;
+            online) [ "$(user_sessions "$user")" -gt 0 ] && total=$(( total + 1 )) ;;
+        esac
+    done < <(db_names)
+    printf '%s' "$total"
+}
+
+dashboard() {
+    local transports
+    transports="SSH $SSH_PORT"
+    [ "$ENABLE_TLS" = "yes" ] && transports="$transports  TLS $TLS_PORT"
+    [ "$ENABLE_WS" = "yes" ] && transports="$transports  WS $WS_PORT"
+
+    field "Server" "${SERVER_HOST:-unknown}"
+    field "Transports" "$transports"
+    printf '  %-22s %b  %b  %b\n' "Services" \
+        "sshd $(svc_badge "$(sshd_service_name).service")" \
+        "tls $(svc_badge "$STUNNEL_UNIT")" \
+        "ws $(svc_badge "$WS_UNIT")"
+    field "Accounts" "$(db_count) total, $(count_by_state online) online, $(count_by_state expired) expired, $(count_by_state locked) locked"
+    field "Uptime" "$(uptime -p 2>/dev/null | sed 's/^up //')"
+}
+
+menu_settings() {
+    local choice value
+    while :; do
+        banner
+        heading "Settings"
+        field "Server host or IP" "${SERVER_HOST:-unset}"
+        field "SSH port" "$SSH_PORT"
+        field "Extra SSH port" "${SSH_EXTRA_PORT:-none}"
+        field "TLS port" "$TLS_PORT ($ENABLE_TLS)"
+        field "WebSocket port" "$WS_PORT ($ENABLE_WS)"
+        field "WebSocket over TLS" "$WSTLS_PORT"
+        field "Default validity" "$DEFAULT_DAYS days"
+        field "Default connections" "$DEFAULT_MAXCONN"
+        field "Default quota" "$DEFAULT_QUOTA_GB GB"
+        blank
+        plain "1) Server host or IP     5) Toggle WebSocket transport"
+        plain "2) SSH port              6) Default account values"
+        plain "3) Extra SSH port        7) Apply changes and restart"
+        plain "4) Toggle TLS transport  0) Back"
+        blank
+        choice=$(ask "Select" "")
+        case "$choice" in
+            1) value=$(ask "Host or IP" "$SERVER_HOST")
+               [ -n "$value" ] && { SERVER_HOST="$value"; write_config; ok "Saved."; }
+               sleep 1 ;;
+            2) value=$(ask "SSH port" "$SSH_PORT")
+               if valid_port "$value"; then
+                   SSH_PORT="$value"; write_config
+                   warn "Open the new port before disconnecting your current session."
+               else bad "Invalid port."; fi
+               pause ;;
+            3) value=$(ask "Extra SSH port (empty to disable)" "$SSH_EXTRA_PORT")
+               if [ -z "$value" ] || valid_port "$value"; then
+                   SSH_EXTRA_PORT="$value"; write_config; ok "Saved."
+               else bad "Invalid port."; fi
+               sleep 1 ;;
+            4) if [ "$ENABLE_TLS" = "yes" ]; then
+                   ENABLE_TLS="no"; systemctl disable --now "$STUNNEL_UNIT" >/dev/null 2>&1
+               else
+                   ENABLE_TLS="yes"
+                   value=$(ask "TLS port" "$TLS_PORT")
+                   valid_port "$value" && TLS_PORT="$value"
+               fi
+               write_config; ok "Saved."; sleep 1 ;;
+            5) if [ "$ENABLE_WS" = "yes" ]; then
+                   ENABLE_WS="no"; systemctl disable --now "$WS_UNIT" >/dev/null 2>&1
+               else
+                   ENABLE_WS="yes"
+                   value=$(ask "WebSocket port" "$WS_PORT")
+                   valid_port "$value" && WS_PORT="$value"
+               fi
+               write_config; ok "Saved."; sleep 1 ;;
+            6) value=$(ask "Default validity in days" "$DEFAULT_DAYS")
+               is_number "$value" && DEFAULT_DAYS="$value"
+               value=$(ask "Default max connections" "$DEFAULT_MAXCONN")
+               is_number "$value" && DEFAULT_MAXCONN="$value"
+               value=$(ask "Default quota in GB" "$DEFAULT_QUOTA_GB")
+               is_number "$value" && DEFAULT_QUOTA_GB="$value"
+               write_config; ok "Saved."; sleep 1 ;;
+            7) sshd_apply
+               [ "$ENABLE_TLS" = "yes" ] && stunnel_apply
+               [ "$ENABLE_WS" = "yes" ] && ws_apply
+               firewall_apply
+               pause ;;
+            0|q|"") return ;;
+            *) bad "Unknown option."; sleep 1 ;;
+        esac
+    done
+}
+
+main_menu() {
+    local choice
+    while :; do
+        banner
+        dashboard
+        blank
+        plain "1) Accounts             5) Firewall and hardening"
+        plain "2) Live connections     6) Backup and restore"
+        plain "3) Traffic report       7) Settings"
+        plain "4) Transports           8) About"
+        plain "0) Exit"
+        blank
+        choice=$(ask "Select" "")
+        case "$choice" in
+            1) menu_users ;;
+            2) menu_connections ;;
+            3) menu_traffic ;;
+            4) menu_services ;;
+            5) menu_security ;;
+            6) menu_backup ;;
+            7) menu_settings ;;
+            8) show_about; pause ;;
+            0|q) blank; exit 0 ;;
+            "") : ;;
+            *) bad "Unknown option."; sleep 1 ;;
+        esac
+    done
+}
+
+show_about() {
+    heading "About"
+    field "Version" "$TUNNELCTL_VERSION"
+    field "Config" "$CONF_FILE"
+    field "Database" "$DB_FILE"
+    field "Log" "$LOG_FILE"
+    field "Maintainer" "sslri"
+    field "Email" "asksslri@gmail.com"
+    field "Telegram" "@sslri"
+    field "Instagram" "@sslri"
+    blank
+}
+
+usage() {
+    cat <<EOF
+
+  $APP_NAME $TUNNELCTL_VERSION
+
+  tunnelctl                         open the interactive console
+  tunnelctl status                  print a short status summary
+  tunnelctl list                    list every account
+  tunnelctl add USER [DAYS] [CONN] [GB]
+  tunnelctl del USER
+  tunnelctl lock USER
+  tunnelctl unlock USER
+  tunnelctl renew USER DAYS
+  tunnelctl passwd USER [PASSWORD]
+  tunnelctl show USER
+  tunnelctl online                  list live sessions
+  tunnelctl traffic                 traffic report
+  tunnelctl backup                  create a backup archive
+  tunnelctl restore FILE            restore from an archive
+  tunnelctl restart                 restart every transport
+  tunnelctl version
+
+EOF
+}
+
+cli() {
+    local cmd="$1"; shift
+    case "$cmd" in
+        status)
+            banner; dashboard; blank; services_overview ;;
+        list) user_list_table ;;
+        add)
+            local user="${1:-}" days="${2:-$DEFAULT_DAYS}" conn="${3:-$DEFAULT_MAXCONN}" gb="${4:-$DEFAULT_QUOTA_GB}" pass
+            [ -n "$user" ] || die "Usage: tunnelctl add USER [DAYS] [CONN] [GB]"
+            valid_username "$user" || die "Invalid username."
+            system_user_exists "$user" && die "That name already exists."
+            pass=$(random_secret 12)
+            user_create "$user" "$pass" "$days" "$conn" "$gb" || die "Creation failed."
+            user_card "$user" "$pass" ;;
+        del)
+            [ -n "${1:-}" ] || die "Usage: tunnelctl del USER"
+            db_has "$1" || die "No such account."
+            user_delete "$1"; ok "Removed $1." ;;
+        lock)
+            db_has "${1:-}" || die "No such account."
+            user_lock "$1"; ok "Locked $1." ;;
+        unlock)
+            db_has "${1:-}" || die "No such account."
+            user_unlock "$1"; ok "Unlocked $1." ;;
+        renew)
+            db_has "${1:-}" || die "No such account."
+            [ -n "${2:-}" ] || die "Usage: tunnelctl renew USER DAYS"
+            ok "New expiry: $(user_extend "$1" "$2")" ;;
+        passwd)
+            db_has "${1:-}" || die "No such account."
+            local newpass="${2:-$(random_secret 12)}"
+            user_set_password "$1" "$newpass"
+            user_card "$1" "$newpass" ;;
+        show)
+            db_has "${1:-}" || die "No such account."
+            user_card "$1" "" ;;
+        online) online_view ;;
+        traffic) traffic_view ;;
+        backup) ok "Saved to $(backup_create)" ;;
+        restore)
+            [ -n "${1:-}" ] || die "Usage: tunnelctl restore FILE"
+            backup_restore "$1" ;;
+        restart) services_restart_all ;;
+        version) printf '%s %s\n' "$APP_NAME" "$TUNNELCTL_VERSION" ;;
+        help|-h|--help) usage ;;
+        *) usage; exit 1 ;;
+    esac
+}
+
+if [ "$#" -gt 0 ]; then
+    cli "$@"
+else
+    main_menu
+fi
