@@ -1,0 +1,6 @@
+*.log
+*.tar.gz
+*.pem
+*.key
+*.crt
+.DS_Store
