@@ -71,6 +71,38 @@ sshd_root_has_keys() {
     [ -s /root/.ssh/authorized_keys ]
 }
 
+sshd_socket_activated() {
+    systemctl is-active --quiet ssh.socket 2>/dev/null && return 0
+    systemctl is-enabled ssh.socket >/dev/null 2>&1
+}
+
+sshd_release_socket() {
+    sshd_socket_activated || return 0
+    note "systemd socket activation is on, so extra SSH ports are ignored."
+    note "Switching to a plain sshd service."
+    touch "$CONF_DIR/.socket-activation-was-on" 2>/dev/null || true
+    systemctl enable ssh.service >/dev/null 2>&1
+    systemctl stop ssh.socket >/dev/null 2>&1
+    systemctl disable ssh.socket >/dev/null 2>&1
+    systemctl restart ssh.service >/dev/null 2>&1
+    sleep 1
+    ok "Socket activation disabled, sshd now owns its ports."
+}
+
+sshd_verify_ports() {
+    local port missing=0
+    for port in "$SSH_PORT" $SSH_EXTRA_PORT; do
+        [ -n "$port" ] || continue
+        if ! port_open "$port"; then
+            bad "sshd is not listening on port $port."
+            missing=1
+        fi
+    done
+    [ "$missing" = "0" ] && return 0
+    warn "Check the reason with: journalctl -u $(sshd_service_name) -n 20"
+    return 1
+}
+
 sshd_apply() {
     local tmp
     sshd_backup_once
@@ -96,9 +128,12 @@ sshd_apply() {
     rm -f "$tmp"
 
     if sshd -t 2>/dev/null; then
+        sshd_release_socket
         systemctl restart "$(sshd_service_name)" 2>/dev/null
-        ok "SSH daemon configured on port $SSH_PORT."
+        sleep 1
+        ok "SSH daemon configured on port $SSH_PORT${SSH_EXTRA_PORT:+ and $SSH_EXTRA_PORT}."
         sshd_root_has_keys || warn "Root has no SSH key, password login for root left enabled."
+        sshd_verify_ports || true
         return 0
     fi
 
