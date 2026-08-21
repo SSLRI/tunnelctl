@@ -53,6 +53,11 @@ nft delete table inet tunnelctl_fw >/dev/null 2>&1 || true
 rm -f "$SSHD_DROPIN" "$STUNNEL_CONF" "$STUNNEL_CERT" /etc/fail2ban/jail.d/tunnelctl.conf \
       /etc/sysctl.d/99-tunnelctl.conf /etc/nftables.d/tunnelctl.nft
 
+if [ -f "$CONF_DIR/.socket-activation-was-on" ]; then
+    systemctl enable --now ssh.socket >/dev/null 2>&1
+    ok "systemd socket activation restored."
+fi
+
 if [ -f "$SSHD_MAIN.tunnelctl.bak" ]; then
     cp -a "$SSHD_MAIN.tunnelctl.bak" "$SSHD_MAIN"
     ok "Original sshd_config restored."
