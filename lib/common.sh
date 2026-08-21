@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 
-TUNNELCTL_VERSION="1.0.0"
+export LC_ALL=C
+
+TUNNELCTL_VERSION="1.1.0"
 APP_NAME="TunnelCTL"
 APP_DIR="/usr/local/lib/tunnelctl"
 LIBEXEC_DIR="$APP_DIR/libexec"
@@ -17,6 +19,7 @@ ACCT_TABLE="tnl_acct"
 SSHD_MAIN="/etc/ssh/sshd_config"
 SSHD_DROPIN="/etc/ssh/sshd_config.d/10-tunnelctl.conf"
 STUNNEL_CONF="/etc/stunnel/tunnelctl.conf"
+SSHD_PROC="sshd|sshd-session"
 UI_WIDTH=64
 
 SERVER_HOST=""
@@ -54,6 +57,17 @@ note() { printf '  %s%s%s %s\n' "$C_CYAN" "-" "$C_RESET" "$*"; }
 plain(){ printf '  %s\n' "$*"; }
 blank(){ printf '\n'; }
 
+strip_ansi() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m//g'; }
+
+padded() {
+    local text="$1" width="$2" bare len pad
+    bare=$(strip_ansi "$text")
+    len=${#bare}
+    pad=$(( width - len ))
+    [ "$pad" -lt 0 ] && pad=0
+    printf '%s%*s' "$text" "$pad" ""
+}
+
 rule() {
     local i out=""
     for (( i = 0; i < UI_WIDTH; i++ )); do out="$out-"; done
@@ -83,33 +97,54 @@ log_event() {
 die() { bad "$1"; exit "${2:-1}"; }
 
 need_root() {
-    [ "$(id -u)" -eq 0 ] || die "This tool must be run as root."
+    [ "$(id -u)" -eq 0 ] || die "This tool must be run as root. Try: sudo tunnelctl"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+tty_write() {
+    if [ -e /dev/tty ] && [ -w /dev/tty ]; then
+        printf '%s' "$1" > /dev/tty
+    else
+        printf '%s' "$1" >&2
+    fi
+}
+
+tty_read() {
+    local answer=""
+    if [ -e /dev/tty ] && [ -r /dev/tty ]; then
+        IFS= read -r answer < /dev/tty || true
+    else
+        IFS= read -r answer || true
+    fi
+    answer="${answer%$'\r'}"
+    answer="${answer#"${answer%%[![:space:]]*}"}"
+    answer="${answer%"${answer##*[![:space:]]}"}"
+    printf '%s' "$answer"
+}
+
 pause() {
     blank
-    printf '  %sPress Enter to continue%s ' "$C_GREY" "$C_RESET"
-    read -r _ || true
+    tty_write "  ${C_GREY}Press Enter to continue${C_RESET} "
+    tty_read >/dev/null
 }
 
 ask() {
     local prompt="$1" default="${2:-}" reply
     if [ -n "$default" ]; then
-        printf '  %s %s[%s]%s ' "$prompt" "$C_GREY" "$default" "$C_RESET"
+        tty_write "  $prompt ${C_GREY}[$default]${C_RESET} "
     else
-        printf '  %s ' "$prompt"
+        tty_write "  $prompt "
     fi
-    read -r reply || true
+    reply=$(tty_read)
     printf '%s' "${reply:-$default}"
 }
 
 ask_yes() {
     local prompt="$1" default="${2:-y}" reply hint="Y/n"
     [ "$default" = "n" ] && hint="y/N"
-    printf '  %s %s[%s]%s ' "$prompt" "$C_GREY" "$hint" "$C_RESET"
-    read -r reply || true
+    tty_write "  $prompt ${C_GREY}[$hint]${C_RESET} "
+    reply=$(tty_read)
     reply="${reply:-$default}"
     case "$reply" in
         [yY]|[yY][eE][sS]) return 0 ;;
@@ -128,8 +163,10 @@ valid_username() {
 }
 
 random_secret() {
-    local len="${1:-12}"
-    tr -dc 'A-Za-z0-9' < /dev/urandom | head -c "$len"
+    local len="${1:-12}" out
+    out=$(head -c 512 /dev/urandom 2>/dev/null | tr -dc 'A-Za-z0-9' | head -c "$len")
+    [ -n "$out" ] || out=$(date +%s%N | sha256sum | head -c "$len")
+    printf '%s' "$out"
 }
 
 human_bytes() {
@@ -166,15 +203,25 @@ is_expired() {
 }
 
 detect_public_ip() {
-    local ip=""
+    local ip="" url
     if have curl; then
-        ip=$(curl -fsS --max-time 6 https://api.ipify.org 2>/dev/null || true)
-        [ -z "$ip" ] && ip=$(curl -fsS --max-time 6 https://ifconfig.me 2>/dev/null || true)
+        for url in https://api.ipify.org https://ipinfo.io/ip https://api.ip.sb/ip \
+                   https://ifconfig.me/ip https://icanhazip.com; do
+            ip=$(curl -4 -fsS --max-time 5 "$url" 2>/dev/null | tr -d '[:space:]')
+            [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] && { printf '%s' "$ip"; return; }
+            ip=""
+        done
     fi
-    if [ -z "$ip" ] && have ip; then
+    if have ip; then
         ip=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '/src/ {print $7; exit}')
+        [ -n "$ip" ] && { printf '%s' "$ip"; return; }
     fi
+    ip=$(hostname -I 2>/dev/null | awk '{print $1}')
     printf '%s' "$ip"
+}
+
+active_ssh_ports() {
+    ss -lntH 2>/dev/null | awk '/sshd/ {n = split($4, a, ":"); print a[n]}' | sort -un | tr '\n' ' '
 }
 
 load_config() {
@@ -258,24 +305,33 @@ db_remove() {
 
 db_count() { db_names | wc -l | tr -d ' '; }
 
+svc_exists() {
+    systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$1"
+}
+
 svc_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
 
 svc_badge() {
     if svc_active "$1"; then
         printf '%sactive%s' "$C_GREEN" "$C_RESET"
-    elif systemctl list-unit-files 2>/dev/null | grep -q "^$1"; then
+    elif svc_exists "$1"; then
         printf '%sstopped%s' "$C_RED" "$C_RESET"
     else
-        printf '%sabsent%s' "$C_GREY" "$C_RESET"
+        printf '%snot installed%s' "$C_GREY" "$C_RESET"
     fi
 }
 
 port_open() {
-    ss -lnt 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {found = 1} END {exit !found}'
+    ss -lntH 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {found = 1} END {exit !found}'
+}
+
+port_owner() {
+    ss -lntpH 2>/dev/null | awk -v p=":$1" '$4 ~ p"$" {print $0; exit}' | \
+        sed -n 's/.*users:((\"\([^\"]*\)\".*/\1/p'
 }
 
 sshd_service_name() {
-    if systemctl list-unit-files 2>/dev/null | grep -q '^ssh\.service'; then
+    if svc_exists "ssh.service"; then
         printf 'ssh'
     else
         printf 'sshd'
