@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 
-TUNNELCTL_VERSION="1.1.0"
+TUNNELCTL_VERSION="1.1.1"
 APP_NAME="TunnelCTL"
 APP_DIR="/usr/local/lib/tunnelctl"
 LIBEXEC_DIR="$APP_DIR/libexec"
@@ -11,6 +11,7 @@ CONF_FILE="$CONF_DIR/tunnelctl.conf"
 DB_FILE="$CONF_DIR/users.db"
 CERT_DIR="$CONF_DIR/certs"
 CERT_FILE="$CERT_DIR/stunnel.pem"
+STUNNEL_CERT="/etc/stunnel/tunnelctl.pem"
 LOG_FILE="/var/log/tunnelctl.log"
 BACKUP_DIR="/var/backups/tunnelctl"
 LOCK_FILE="/run/tunnelctl.lock"
@@ -306,7 +307,7 @@ db_remove() {
 db_count() { db_names | wc -l | tr -d ' '; }
 
 svc_exists() {
-    systemctl list-unit-files --no-legend 2>/dev/null | awk '{print $1}' | grep -qx "$1"
+    systemctl cat "$1" >/dev/null 2>&1
 }
 
 svc_active() { systemctl is-active --quiet "$1" 2>/dev/null; }
@@ -331,7 +332,7 @@ port_owner() {
 }
 
 sshd_service_name() {
-    if svc_exists "ssh.service"; then
+    if systemctl cat ssh.service >/dev/null 2>&1; then
         printf 'ssh'
     else
         printf 'sshd'
