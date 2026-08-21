@@ -12,7 +12,7 @@ need_root
 
 detect_platform() {
     local id=""
-    [ -f /etc/os-release ] && id=$(. /etc/os-release && printf '%s' "${ID:-}")
+    [ -f /etc/os-release ] && id=$(. /etc/os-release && printf '%s %s' "${ID:-unknown}" "${VERSION_ID:-}")
     printf '%s' "$id"
 }
 
@@ -24,35 +24,56 @@ package_manager() {
     fi
 }
 
+install_one() {
+    local pm="$1" pkg="$2"
+    case "$pm" in
+        apt) DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "$pkg" >/dev/null 2>&1 ;;
+        dnf) dnf install -y "$pkg" >/dev/null 2>&1 ;;
+        yum) yum install -y "$pkg" >/dev/null 2>&1 ;;
+        *) return 1 ;;
+    esac
+}
+
 install_dependencies() {
-    local pm
+    local pm pkg missing="" tool
     pm=$(package_manager)
     heading "Dependencies"
-    case "$pm" in
-        apt)
-            export DEBIAN_FRONTEND=noninteractive
-            apt-get update -qq >/dev/null 2>&1
-            apt-get install -y -qq openssh-server stunnel4 python3 openssl curl \
-                iproute2 nftables ufw fail2ban procps coreutils >/dev/null 2>&1
-            ;;
-        dnf|yum)
-            "$pm" install -y openssh-server stunnel python3 openssl curl \
-                iproute nftables firewalld fail2ban procps-ng >/dev/null 2>&1
-            ;;
-        *)
-            warn "Unknown package manager, install the dependencies manually."
-            ;;
-    esac
 
-    local missing=""
-    for tool in sshd python3 openssl ss chage useradd; do
+    if [ "$pm" = "none" ]; then
+        warn "No supported package manager found, install the tools yourself."
+    else
+        if [ "$pm" = "apt" ]; then
+            note "Refreshing the package index, this can take a moment."
+            DEBIAN_FRONTEND=noninteractive apt-get update -qq >/dev/null 2>&1 || \
+                warn "Package index refresh failed, continuing with the cached one."
+        fi
+
+        local base="openssh-server python3 openssl curl"
+        local extra
+        if [ "$pm" = "apt" ]; then
+            extra="stunnel4 iproute2 nftables ufw fail2ban procps coreutils"
+        else
+            extra="stunnel iproute nftables firewalld fail2ban procps-ng"
+        fi
+
+        for pkg in $base $extra; do
+            if install_one "$pm" "$pkg"; then
+                ok "$pkg"
+            else
+                warn "$pkg could not be installed"
+            fi
+        done
+    fi
+
+    for tool in sshd python3 openssl ss chage useradd flock awk; do
         have "$tool" || missing="$missing $tool"
     done
     if [ -n "$missing" ]; then
-        bad "Missing tools:$missing"
+        bad "Missing required tools:$missing"
         return 1
     fi
-    ok "All required packages are present."
+    have nft || warn "nft is missing, traffic accounting will stay at zero."
+    ok "Required tools are present."
     return 0
 }
 
@@ -73,12 +94,12 @@ deploy_files() {
     db_init
     getent group "$TUNNEL_GROUP" >/dev/null 2>&1 || groupadd "$TUNNEL_GROUP"
     ok "Installed to $TARGET_DIR"
-    ok "Command available as tunnelctl"
+    ok "Available as the tunnelctl command"
 }
 
 current_ssh_port() {
     local port
-    port=$(ss -lntp 2>/dev/null | awk '/sshd/ {split($4, a, ":"); print a[length(a)]; exit}')
+    port=$(active_ssh_ports | awk '{print $1}')
     [ -n "$port" ] || port=22
     printf '%s' "$port"
 }
@@ -87,6 +108,9 @@ wizard() {
     local detected value
 
     heading "Setup"
+    plain "${C_GREY}Press Enter to accept the value in brackets.${C_RESET}"
+    blank
+
     detected=$(detect_public_ip)
     value=$(ask "Public IP or domain of this server" "${SERVER_HOST:-$detected}")
     SERVER_HOST="$value"
@@ -101,7 +125,7 @@ wizard() {
         SSH_EXTRA_PORT=""
     fi
 
-    if ask_yes "Enable the TLS transport (stunnel)?" "y"; then
+    if ask_yes "Enable the TLS transport on port 443 (stunnel)?" "y"; then
         ENABLE_TLS="yes"
         value=$(ask "TLS port" "${TLS_PORT:-443}")
         valid_port "$value" && TLS_PORT="$value"
@@ -109,7 +133,7 @@ wizard() {
         ENABLE_TLS="no"
     fi
 
-    if ask_yes "Enable the WebSocket transport?" "y"; then
+    if ask_yes "Enable the WebSocket transport on port 80?" "y"; then
         ENABLE_WS="yes"
         value=$(ask "WebSocket port" "${WS_PORT:-80}")
         valid_port "$value" && WS_PORT="$value"
@@ -133,15 +157,18 @@ wizard() {
 }
 
 port_conflicts() {
-    local port busy=""
-    for port in $(managed_ports); do
-        if [ "$port" != "$SSH_PORT" ] && [ "$port" != "$SSH_EXTRA_PORT" ] && port_open "$port"; then
-            busy="$busy $port"
+    local port owner busy=0
+    for port in "$TLS_PORT" "$WS_PORT" "$WSTLS_PORT"; do
+        [ -n "$port" ] || continue
+        if port_open "$port"; then
+            owner=$(port_owner "$port")
+            warn "Port $port is already used by ${owner:-another process}."
+            busy=1
         fi
     done
-    if [ -n "$busy" ]; then
-        warn "These ports are already in use:$busy"
-        warn "Free them or pick different ports, otherwise those transports will not start."
+    if [ "$busy" = "1" ]; then
+        warn "Stop that service or choose different ports, otherwise those transports will not start."
+        blank
     fi
 }
 
@@ -154,10 +181,11 @@ summary() {
     [ "$ENABLE_WS" = "yes" ] && field "WebSocket" "$WS_PORT"
     [ "$ENABLE_TLS" = "yes" ] && [ "$ENABLE_WS" = "yes" ] && field "WebSocket over TLS" "$WSTLS_PORT"
     rule
-    plain "Open the console with:  ${C_BOLD}tunnelctl${C_RESET}"
-    plain "Create an account with: ${C_BOLD}tunnelctl add myuser 30 2 0${C_RESET}"
+    plain "Open the console:   ${C_BOLD}sudo tunnelctl${C_RESET}"
+    plain "Create an account:  ${C_BOLD}sudo tunnelctl add ali 30 2 50${C_RESET}"
+    plain "Check the ports:    ${C_BOLD}sudo tunnelctl check${C_RESET}"
     blank
-    plain "${C_GREY}Keep your current SSH session open until you have verified"
+    plain "${C_GREY}Keep your current SSH session open until you have confirmed"
     plain "that you can log in again on the configured port.${C_RESET}"
     blank
 }
@@ -186,12 +214,14 @@ main() {
     port_conflicts
 
     heading "Transports"
-    sshd_apply || die "SSH configuration failed."
+    sshd_apply || die "SSH configuration failed, nothing was changed."
     if [ "$ENABLE_TLS" = "yes" ]; then
         cert_generate && ok "Self signed certificate created."
-        stunnel_apply
+        stunnel_apply || warn "TLS transport is not running, fix it later with: tunnelctl repair"
     fi
-    [ "$ENABLE_WS" = "yes" ] && ws_apply
+    if [ "$ENABLE_WS" = "yes" ]; then
+        ws_apply || warn "WebSocket transport is not running, fix it later with: tunnelctl repair"
+    fi
     watchdog_apply
     acct_bootstrap && ok "Traffic accounting enabled."
 
@@ -201,10 +231,26 @@ main() {
     sysctl_apply
     limits_apply
     if ask_yes "Enable fail2ban for the SSH ports?" "y"; then
-        fail2ban_apply
+        fail2ban_apply || true
     fi
 
+    transports_check
     log_event "installation completed version $TUNNELCTL_VERSION"
+
+    if ask_yes "Create a first account now?" "y"; then
+        local first pass
+        first=$(ask "Username" "user1")
+        if valid_username "$first" && ! system_user_exists "$first"; then
+            pass=$(random_secret 12)
+            if user_create "$first" "$pass" "$DEFAULT_DAYS" "$DEFAULT_MAXCONN" "$DEFAULT_QUOTA_GB"; then
+                user_card "$first" "$pass"
+                pause
+            fi
+        else
+            warn "Skipped, that name is not usable."
+        fi
+    fi
+
     summary
 }
 
