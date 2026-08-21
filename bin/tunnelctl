@@ -37,12 +37,18 @@ dashboard() {
 
     field "Server" "${SERVER_HOST:-unknown}"
     field "Transports" "$transports"
-    printf '  %-22s %b  %b  %b\n' "Services" \
-        "sshd $(svc_badge "$(sshd_service_name).service")" \
-        "tls $(svc_badge "$STUNNEL_UNIT")" \
+    printf '  %-22s %s%s%s\n' "Services" \
+        "$(padded "sshd $(svc_badge "$(sshd_service_name).service")" 22)" \
+        "$(padded "tls $(svc_badge "$STUNNEL_UNIT")" 22)" \
         "ws $(svc_badge "$WS_UNIT")"
     field "Accounts" "$(db_count) total, $(count_by_state online) online, $(count_by_state expired) expired, $(count_by_state locked) locked"
     field "Uptime" "$(uptime -p 2>/dev/null | sed 's/^up //')"
+
+    if { [ "$ENABLE_TLS" = "yes" ] && ! svc_exists "$STUNNEL_UNIT"; } || \
+       { [ "$ENABLE_WS" = "yes" ] && ! svc_exists "$WS_UNIT"; }; then
+        blank
+        warn "Some transports are not installed. Use 4) Transports then 3) Repair everything."
+    fi
 }
 
 menu_settings() {
@@ -177,6 +183,8 @@ usage() {
   tunnelctl backup                  create a backup archive
   tunnelctl restore FILE            restore from an archive
   tunnelctl restart                 restart every transport
+  tunnelctl repair                  rebuild every transport and firewall rule
+  tunnelctl check                   show which ports are listening
   tunnelctl version
 
 EOF
@@ -225,6 +233,8 @@ cli() {
             [ -n "${1:-}" ] || die "Usage: tunnelctl restore FILE"
             backup_restore "$1" ;;
         restart) services_restart_all ;;
+        repair) transports_repair ;;
+        check) transports_check ;;
         version) printf '%s %s\n' "$APP_NAME" "$TUNNELCTL_VERSION" ;;
         help|-h|--help) usage ;;
         *) usage; exit 1 ;;
