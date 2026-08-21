@@ -127,10 +127,36 @@ stunnel_binary() {
     fi
 }
 
+install_stunnel_package() {
+    if have apt-get; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq stunnel4 >/dev/null 2>&1 || \
+        DEBIAN_FRONTEND=noninteractive apt-get install -y -qq stunnel >/dev/null 2>&1
+    elif have dnf; then
+        dnf install -y stunnel >/dev/null 2>&1
+    elif have yum; then
+        yum install -y stunnel >/dev/null 2>&1
+    fi
+}
+
 stunnel_apply() {
-    local bin
+    local bin owner
     bin=$(stunnel_binary)
-    [ -n "$bin" ] || { bad "stunnel is not installed."; return 1; }
+    if [ -z "$bin" ]; then
+        note "stunnel is missing, trying to install it."
+        install_stunnel_package
+        bin=$(stunnel_binary)
+    fi
+    [ -n "$bin" ] || { bad "stunnel could not be installed, TLS transport skipped."; return 1; }
+
+    if port_open "$TLS_PORT"; then
+        owner=$(port_owner "$TLS_PORT")
+        if [ "$owner" != "stunnel" ] && [ "$owner" != "stunnel4" ]; then
+            bad "Port $TLS_PORT is already used by ${owner:-another process}."
+            warn "Stop it, or choose another TLS port in Settings."
+            return 1
+        fi
+    fi
+
     [ -f "$CERT_FILE" ] || cert_generate || { bad "Certificate generation failed."; return 1; }
 
     mkdir -p /etc/stunnel
@@ -191,6 +217,16 @@ EOF
 }
 
 ws_apply() {
+    local owner
+    if port_open "$WS_PORT"; then
+        owner=$(port_owner "$WS_PORT")
+        if [ "$owner" != "python3" ] && [ "$owner" != "python" ]; then
+            bad "Port $WS_PORT is already used by ${owner:-another process}."
+            warn "Stop it, or choose another WebSocket port in Settings."
+            return 1
+        fi
+    fi
+
     cat > "/etc/systemd/system/$WS_UNIT" <<EOF
 [Unit]
 Description=TunnelCTL WebSocket transport
@@ -255,19 +291,54 @@ services_restart_all() {
     ok "All transports restarted."
 }
 
-services_overview() {
-    heading "Transports"
-    printf '  %-22s %-12b %s\n' "SSH direct" "$(svc_badge "$(sshd_service_name).service")" "port $SSH_PORT"
+transports_repair() {
+    heading "Rebuilding transports"
+    sshd_apply || return 1
     if [ "$ENABLE_TLS" = "yes" ]; then
-        printf '  %-22s %-12b %s\n' "TLS (stunnel)" "$(svc_badge "$STUNNEL_UNIT")" "port $TLS_PORT"
+        stunnel_apply || warn "TLS transport is not running."
     fi
     if [ "$ENABLE_WS" = "yes" ]; then
-        printf '  %-22s %-12b %s\n' "WebSocket" "$(svc_badge "$WS_UNIT")" "port $WS_PORT"
+        ws_apply || warn "WebSocket transport is not running."
+    fi
+    watchdog_apply
+    acct_bootstrap >/dev/null 2>&1 && ok "Traffic accounting ready."
+    firewall_apply
+    blank
+    transports_check
+}
+
+transports_check() {
+    local port state
+    heading "Reachability check"
+    for port in $(managed_ports); do
+        if port_open "$port"; then
+            state="${C_GREEN}listening${C_RESET}"
+        else
+            state="${C_RED}closed${C_RESET}"
+        fi
+        printf '  %-22s %b %s\n' "tcp/$port" "$state" "$(port_owner "$port")"
+    done
+    blank
+}
+
+services_overview() {
+    heading "Transports"
+    printf '  %-22s %s %s\n' "SSH direct" \
+        "$(padded "$(svc_badge "$(sshd_service_name).service")" 15)" "port $SSH_PORT"
+    if [ "$ENABLE_TLS" = "yes" ]; then
+        printf '  %-22s %s %s\n' "TLS (stunnel)" \
+            "$(padded "$(svc_badge "$STUNNEL_UNIT")" 15)" "port $TLS_PORT"
+    fi
+    if [ "$ENABLE_WS" = "yes" ]; then
+        printf '  %-22s %s %s\n' "WebSocket" \
+            "$(padded "$(svc_badge "$WS_UNIT")" 15)" "port $WS_PORT"
     fi
     if [ "$ENABLE_TLS" = "yes" ] && [ "$ENABLE_WS" = "yes" ]; then
-        printf '  %-22s %-12b %s\n' "WebSocket over TLS" "$(svc_badge "$STUNNEL_UNIT")" "port $WSTLS_PORT"
+        printf '  %-22s %s %s\n' "WebSocket over TLS" \
+            "$(padded "$(svc_badge "$STUNNEL_UNIT")" 15)" "port $WSTLS_PORT"
     fi
-    printf '  %-22s %-12b %s\n' "Watchdog" "$(svc_badge "$WATCHDOG_TIMER")" "every 60s"
+    printf '  %-22s %s %s\n' "Watchdog" \
+        "$(padded "$(svc_badge "$WATCHDOG_TIMER")" 15)" "every 60s"
     blank
     heading "Listening sockets"
     ss -lntp 2>/dev/null | awk 'NR == 1 || /sshd|stunnel|python/ {print "  " $0}' | head -n 15
@@ -281,15 +352,13 @@ menu_services() {
         services_overview
         plain "1) Restart every transport      4) Rebuild TLS certificate"
         plain "2) Rebuild SSH configuration    5) Live logs"
-        plain "3) Rebuild TLS and WebSocket    0) Back"
+        plain "3) Repair everything            0) Back"
         blank
         choice=$(ask "Select" "")
         case "$choice" in
             1) services_restart_all; pause ;;
             2) sshd_apply; pause ;;
-            3) [ "$ENABLE_TLS" = "yes" ] && stunnel_apply
-               [ "$ENABLE_WS" = "yes" ] && ws_apply
-               pause ;;
+            3) transports_repair; pause ;;
             4) if cert_generate; then
                    ok "New certificate generated."
                    systemctl restart "$STUNNEL_UNIT" 2>/dev/null
