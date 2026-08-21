@@ -10,6 +10,7 @@ backup_create() {
     cp -a "$CONF_DIR" "$dir/etc/tunnelctl" 2>/dev/null || true
     [ -f "$SSHD_DROPIN" ] && cp -a "$SSHD_DROPIN" "$dir/sshd-tunnelctl.conf"
     [ -f "$STUNNEL_CONF" ] && cp -a "$STUNNEL_CONF" "$dir/stunnel-tunnelctl.conf"
+    cert_publish >/dev/null 2>&1 || true
 
     : > "$dir/accounts.txt"
     while IFS= read -r user; do
