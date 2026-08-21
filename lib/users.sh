@@ -3,24 +3,32 @@
 system_user_exists() { id "$1" >/dev/null 2>&1; }
 
 user_sessions() {
-    pgrep -x sshd -u "$1" 2>/dev/null | wc -l | tr -d ' '
+    pgrep -u "$1" -x "$SSHD_PROC" 2>/dev/null | wc -l | tr -d ' '
 }
 
 kill_sessions() {
     pkill -KILL -u "$1" 2>/dev/null || true
 }
 
-user_status_label() {
-    local user="$1" state expires
-    state=$(db_state "$user")
-    expires=$(db_expires "$user")
-    if [ "$state" = "locked" ]; then
-        printf '%slocked%s' "$C_RED" "$C_RESET"
-    elif is_expired "$expires"; then
-        printf '%sexpired%s' "$C_YELLOW" "$C_RESET"
+user_status_plain() {
+    local user="$1"
+    if [ "$(db_state "$user")" = "locked" ]; then
+        printf 'locked'
+    elif is_expired "$(db_expires "$user")"; then
+        printf 'expired'
     else
-        printf '%sactive%s' "$C_GREEN" "$C_RESET"
+        printf 'active'
     fi
+}
+
+user_status_label() {
+    local state
+    state=$(user_status_plain "$1")
+    case "$state" in
+        locked)  printf '%slocked%s' "$C_RED" "$C_RESET" ;;
+        expired) printf '%sexpired%s' "$C_YELLOW" "$C_RESET" ;;
+        *)       printf '%sactive%s' "$C_GREEN" "$C_RESET" ;;
+    esac
 }
 
 user_create() {
@@ -166,13 +174,13 @@ user_list_table() {
         online=$(user_sessions "$user")
         left=$(days_left "$expires")
         [ "$left" = "unlimited" ] && left="inf"
-        state=$(user_status_label "$user")
+        state=$(padded "$(user_status_label "$user")" 9)
         if [ "$quota" = "0" ]; then
-            printf '  %-16s %-18b %-12s %-6s %-8s %s\n' \
+            printf '  %-16s %s %-12s %-6s %-8s %s\n' \
                 "$user" "$state" "$expires" "$left" "$online/$(db_maxconn "$user")" \
                 "$(human_bytes "$used")"
         else
-            printf '  %-16s %-18b %-12s %-6s %-8s %s\n' \
+            printf '  %-16s %s %-12s %-6s %-8s %s\n' \
                 "$user" "$state" "$expires" "$left" "$online/$(db_maxconn "$user")" \
                 "$(human_bytes "$used") / $(human_bytes "$quota")"
         fi
