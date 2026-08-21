@@ -50,7 +50,7 @@ fi
 nft delete table inet "$ACCT_TABLE" >/dev/null 2>&1 || true
 nft delete table inet tunnelctl_fw >/dev/null 2>&1 || true
 
-rm -f "$SSHD_DROPIN" "$STUNNEL_CONF" /etc/fail2ban/jail.d/tunnelctl.conf \
+rm -f "$SSHD_DROPIN" "$STUNNEL_CONF" "$STUNNEL_CERT" /etc/fail2ban/jail.d/tunnelctl.conf \
       /etc/sysctl.d/99-tunnelctl.conf /etc/nftables.d/tunnelctl.nft
 
 if [ -f "$SSHD_MAIN.tunnelctl.bak" ]; then
