@@ -117,6 +117,14 @@ cert_generate() {
         -subj "/C=US/ST=Cloud/L=Edge/O=TunnelCTL/CN=$cn" >/dev/null 2>&1 || return 1
     cat "$CERT_DIR/stunnel.key" "$CERT_DIR/stunnel.crt" > "$CERT_FILE"
     chmod 600 "$CERT_FILE" "$CERT_DIR/stunnel.key"
+    cert_publish
+    return 0
+}
+
+cert_publish() {
+    [ -f "$CERT_FILE" ] || return 1
+    mkdir -p /etc/stunnel
+    install -m 600 -o root -g root "$CERT_FILE" "$STUNNEL_CERT" 2>/dev/null ||         { cp "$CERT_FILE" "$STUNNEL_CERT" && chmod 600 "$STUNNEL_CERT"; }
     return 0
 }
 
@@ -158,32 +166,27 @@ stunnel_apply() {
     fi
 
     [ -f "$CERT_FILE" ] || cert_generate || { bad "Certificate generation failed."; return 1; }
+    cert_publish || { bad "Certificate could not be published to /etc/stunnel."; return 1; }
 
     mkdir -p /etc/stunnel
     {
-        printf 'pid = /run/tunnelctl-tls.pid\n'
         printf 'foreground = yes\n'
-        printf 'debug = 3\n'
+        printf 'debug = 4\n'
         printf 'socket = l:TCP_NODELAY=1\n'
         printf 'socket = r:TCP_NODELAY=1\n'
-        printf 'options = NO_SSLv2\n'
-        printf 'options = NO_SSLv3\n'
-        printf 'options = NO_TLSv1\n'
-        printf 'options = NO_TLSv1.1\n'
-        printf 'sslVersion = all\n'
-        printf 'ciphers = ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-GCM-SHA256\n'
+        printf 'sslVersionMin = TLSv1.2\n'
         printf '\n'
         printf '[ssh-tls]\n'
         printf 'accept = 0.0.0.0:%s\n' "$TLS_PORT"
         printf 'connect = 127.0.0.1:%s\n' "$SSH_PORT"
-        printf 'cert = %s\n' "$CERT_FILE"
+        printf 'cert = %s\n' "$STUNNEL_CERT"
         printf 'TIMEOUTclose = 0\n'
         if [ "$ENABLE_WS" = "yes" ]; then
             printf '\n'
             printf '[ws-tls]\n'
             printf 'accept = 0.0.0.0:%s\n' "$WSTLS_PORT"
             printf 'connect = 127.0.0.1:%s\n' "$WS_PORT"
-            printf 'cert = %s\n' "$CERT_FILE"
+            printf 'cert = %s\n' "$STUNNEL_CERT"
             printf 'TIMEOUTclose = 0\n'
         fi
     } > "$STUNNEL_CONF"
@@ -207,12 +210,15 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now "$STUNNEL_UNIT" >/dev/null 2>&1
-    if svc_active "$STUNNEL_UNIT"; then
+    systemctl enable "$STUNNEL_UNIT" >/dev/null 2>&1
+    systemctl restart "$STUNNEL_UNIT" >/dev/null 2>&1
+    sleep 2
+    if svc_active "$STUNNEL_UNIT" && port_open "$TLS_PORT"; then
         ok "TLS transport listening on port $TLS_PORT."
         return 0
     fi
-    bad "TLS transport failed to start, check: journalctl -u $STUNNEL_UNIT"
+    bad "TLS transport failed to start. Last lines from its log:"
+    journalctl -u "$STUNNEL_UNIT" -n 8 --no-pager 2>/dev/null | sed 's/^/    /'
     return 1
 }
 
@@ -247,12 +253,15 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable --now "$WS_UNIT" >/dev/null 2>&1
-    if svc_active "$WS_UNIT"; then
+    systemctl enable "$WS_UNIT" >/dev/null 2>&1
+    systemctl restart "$WS_UNIT" >/dev/null 2>&1
+    sleep 2
+    if svc_active "$WS_UNIT" && port_open "$WS_PORT"; then
         ok "WebSocket transport listening on port $WS_PORT."
         return 0
     fi
-    bad "WebSocket transport failed to start, check: journalctl -u $WS_UNIT"
+    bad "WebSocket transport failed to start. Last lines from its log:"
+    journalctl -u "$WS_UNIT" -n 8 --no-pager 2>/dev/null | sed 's/^/    /'
     return 1
 }
 
