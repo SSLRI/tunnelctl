@@ -3,6 +3,8 @@
 A self-hosted SSH tunnelling server for Linux VPS boxes, with a clean terminal
 console for managing accounts, transports, limits and traffic.
 
+[راهنمای فارسی](README.fa.md)
+
 One installer sets up three ways to reach the same SSH daemon:
 
 | Transport | Default port | Use case |
@@ -103,6 +105,8 @@ tunnelctl online
 tunnelctl traffic
 tunnelctl backup
 tunnelctl status
+tunnelctl check                  # which ports are listening
+tunnelctl repair                 # rebuild transports and firewall rules
 ```
 
 Run `tunnelctl help` for the full list.
@@ -189,6 +193,8 @@ before touching your accounts and data.
 
 | Symptom | Check |
 |---|---|
+| Menu says "Unknown option" | you are on 1.0.0, update to 1.1.0 |
+| A transport shows "not installed" | `sudo tunnelctl repair` |
 | Transport will not start | `journalctl -u tunnelctl-ws -u tunnelctl-tls -n 50` |
 | Port 80 or 443 already taken | stop the web server, or pick other ports in Settings |
 | Client connects then drops | connection limit reached, see the account limits |
