@@ -195,6 +195,7 @@ before touching your accounts and data.
 |---|---|
 | Menu says "Unknown option" | you are on 1.0.0, update to 1.1.0 |
 | A transport shows "not installed" | `sudo tunnelctl repair` |
+| The extra SSH port never listens | systemd socket activation was on, 1.1.2 disables it |
 | Transport will not start | `journalctl -u tunnelctl-ws -u tunnelctl-tls -n 50` |
 | Port 80 or 443 already taken | stop the web server, or pick other ports in Settings |
 | Client connects then drops | connection limit reached, see the account limits |
