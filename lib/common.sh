@@ -2,7 +2,7 @@
 
 export LC_ALL=C
 
-TUNNELCTL_VERSION="1.1.1"
+TUNNELCTL_VERSION="1.1.2"
 APP_NAME="TunnelCTL"
 APP_DIR="/usr/local/lib/tunnelctl"
 LIBEXEC_DIR="$APP_DIR/libexec"
